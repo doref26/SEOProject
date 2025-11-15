@@ -172,12 +172,27 @@ def analyze_url(url: str) -> Dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
 
     title_tag = soup.title.string.strip() if soup.title and soup.title.string else ""
+
+    # Meta description
     meta_desc = ""
     for m in soup.find_all("meta"):
         name = (m.get("name") or m.get("property") or "").lower()
         if name == "description":
             meta_desc = (m.get("content") or "").strip()
             break
+
+    # Meta robots directives (indexation / crawling hints)
+    robots_meta_tag = soup.find("meta", attrs={"name": "robots"})
+    robots_meta_raw = ""
+    robots_meta_flags: Dict[str, bool] = {}
+    if robots_meta_tag and robots_meta_tag.get("content"):
+        robots_meta_raw = robots_meta_tag.get("content", "")
+        directives = [d.strip().lower() for d in robots_meta_raw.split(",")]
+        robots_meta_flags = {
+            "noindex": any("noindex" in d for d in directives),
+            "nofollow": any("nofollow" in d for d in directives),
+            "noarchive": any("noarchive" in d for d in directives),
+        }
 
     canonical = None
     can_tag = soup.find("link", rel=lambda v: v and "canonical" in v.lower())
@@ -193,11 +208,40 @@ def analyze_url(url: str) -> Dict[str, Any]:
     images_without_alt = [img.get("src") for img in images if not (img.get("alt") or "").strip()]
     images_without_alt = [urljoin(final_url, s) for s in images_without_alt if s]
 
+    # Viewport / mobile friendliness
+    viewport_tag = soup.find("meta", attrs={"name": "viewport"})
+    viewport_present = bool(viewport_tag)
+
+    # Structured data (schema.org, JSON-LD / microdata)
+    ld_json_blocks = soup.find_all("script", type="application/ld+json")
+    has_itemtype = bool(soup.find(attrs={"itemtype": True}))
+    structured_data_present = bool(ld_json_blocks or has_itemtype)
+
+    # Internationalization: hreflang annotations
+    hreflang_tags = soup.find_all("link", rel=lambda v: v and "alternate" in v.lower())
+    hreflang_values = [l.get("hreflang") for l in hreflang_tags if l.get("hreflang")]
+    hreflang_present = bool(hreflang_values)
+
     # Basic Open Graph and Twitter Card
     og_title = soup.find("meta", property="og:title")
     og_desc = soup.find("meta", property="og:description")
+    og_image_tag = soup.find("meta", property="og:image")
+    og_image: Optional[str] = None
+    if og_image_tag and og_image_tag.get("content"):
+        try:
+            og_image = urljoin(final_url, og_image_tag.get("content", ""))
+        except Exception:
+            og_image = og_image_tag.get("content") or None
+
     tw_title = soup.find("meta", attrs={"name": "twitter:title"})
     tw_desc = soup.find("meta", attrs={"name": "twitter:description"})
+    tw_image_tag = soup.find("meta", attrs={"name": "twitter:image"})
+    tw_image: Optional[str] = None
+    if tw_image_tag and tw_image_tag.get("content"):
+        try:
+            tw_image = urljoin(final_url, tw_image_tag.get("content", ""))
+        except Exception:
+            tw_image = tw_image_tag.get("content") or None
 
     all_anchors = soup.find_all("a")
     internal_links: List[str] = []
@@ -229,14 +273,50 @@ def analyze_url(url: str) -> Dict[str, Any]:
         "h1": {"count": len(h1_tags), "texts": h1_tags[:20]},
         "canonical": canonical,
         "lang": lang,
-        "open_graph_present": bool(og_title or og_desc),
-        "twitter_card_present": bool(tw_title or tw_desc),
+        "open_graph_present": bool(og_title or og_desc or og_image),
+        "twitter_card_present": bool(tw_title or tw_desc or tw_image),
+        "open_graph_image": og_image,
+        "twitter_card_image": tw_image,
         "word_count": len(words),
         "images": {
             "total": len(images),
             "without_alt_count": len(images_without_alt),
             "sample_without_alt": images_without_alt[:10],
         },
+        "viewport_present": viewport_present,
+        "structured_data_present": structured_data_present,
+        "hreflang": {"present": hreflang_present, "values": hreflang_values[:20]},
+        "robots_meta": {
+            "raw": robots_meta_raw,
+            **robots_meta_flags,
+        }
+        if robots_meta_raw
+        else None,
+    }
+
+    # Performance-related heuristics (simple on-page signals)
+    script_count = len(soup.find_all("script"))
+    stylesheet_count = len(
+        soup.find_all("link", rel=lambda v: v and "stylesheet" in v.lower())
+    )
+    result["performance"] = {
+        "response_time_seconds": result["http"]["response_time_seconds"],
+        "content_length_bytes": result["http"]["content_length_bytes"],
+        "script_count": script_count,
+        "stylesheet_count": stylesheet_count,
+        "image_count": len(images),
+    }
+
+    # Basic mobile friendliness info
+    result["mobile"] = {
+        "viewport_present": viewport_present,
+    }
+
+    # Structured data summary
+    result["structured_data"] = {
+        "present": structured_data_present,
+        "ld_json_blocks": len(ld_json_blocks),
+        "has_itemtype": has_itemtype,
     }
 
     result["links"] = {
@@ -316,6 +396,21 @@ def analyze_url(url: str) -> Dict[str, Any]:
             message="Consider adding relevant external references to authoritative sources.",
             purpose="Increase topical authority and provide users with high-quality supporting resources.",
         )
+    elif result["links"]["external_count"] > 50:
+        _add_recommendation(
+            result,
+            category="links",
+            message="There are many external links on this page; consider whether all of them are necessary and high quality.",
+            purpose="Avoid diluting link equity and keep the page focused on the most useful references.",
+        )
+
+    if result["links"]["internal_count"] < 5:
+        _add_recommendation(
+            result,
+            category="links",
+            message="Only a few internal links detected; consider adding more links to important related pages.",
+            purpose="Strengthen internal linking to help users and crawlers discover key content.",
+        )
 
     if result["html"]["images"]["without_alt_count"] > 0:
         _add_recommendation(
@@ -324,6 +419,13 @@ def analyze_url(url: str) -> Dict[str, Any]:
             message="Add descriptive alt text to all images for accessibility and SEO.",
             purpose="Improve accessibility for assistive technologies and give search engines more context.",
         )
+    if result["html"]["images"]["total"] > 50:
+        _add_recommendation(
+            result,
+            category="images",
+            message="A large number of images were found; consider optimizing and lazy‑loading them.",
+            purpose="Reduce page weight and improve loading performance, especially on mobile.",
+        )
 
     if not robots_info.get("has_robots"):
         _add_recommendation(
@@ -331,6 +433,22 @@ def analyze_url(url: str) -> Dict[str, Any]:
             category="technical",
             message="Consider adding a robots.txt to control crawler access.",
             purpose="Help search engines understand which areas of the site should or should not be crawled.",
+        )
+
+    robots_meta = result["html"].get("robots_meta") or {}
+    if robots_meta.get("noindex"):
+        _add_recommendation(
+            result,
+            category="technical",
+            message="This page contains a meta robots noindex directive.",
+            purpose="Ensure only pages you truly do not want in search results are marked noindex.",
+        )
+    if robots_meta.get("nofollow"):
+        _add_recommendation(
+            result,
+            category="technical",
+            message="This page contains a meta robots nofollow directive.",
+            purpose="Control whether search engines should follow links from this page; review if this is intentional.",
         )
 
     if not sitemap_info.get("found"):
@@ -357,6 +475,14 @@ def analyze_url(url: str) -> Dict[str, Any]:
             purpose="Ensure the page is targeted to the correct language audience and improves international SEO.",
         )
 
+    if hreflang_present and not canonical:
+        _add_recommendation(
+            result,
+            category="internationalization",
+            message="hreflang annotations are present but no canonical tag was found.",
+            purpose="Use canonical + hreflang together so search engines understand the preferred URL per language/region.",
+        )
+
     # Social sharing tags (Open Graph / Twitter Card)
     if not result["html"]["open_graph_present"]:
         _add_recommendation(
@@ -373,6 +499,71 @@ def analyze_url(url: str) -> Dict[str, Any]:
             message="Add Twitter Card meta tags (twitter:title, twitter:description, twitter:image) for better display on Twitter / X.",
             purpose="Ensure links shared on Twitter / X display with rich cards and clear context.",
         )
+
+    # Content depth and quality (very high-level heuristic)
+    word_count = result["html"]["word_count"]
+    if word_count < 300:
+        _add_recommendation(
+            result,
+            category="content",
+            message="The page has relatively little text content.",
+            purpose="Increase the depth and usefulness of the content so it better answers users' queries.",
+        )
+    elif word_count > 2500:
+        _add_recommendation(
+            result,
+            category="content",
+            message="The page is quite long; make sure it is well structured with headings, lists and summaries.",
+            purpose="Improve readability and help users (and search engines) understand the main sections quickly.",
+        )
+
+    # Performance & user experience (heuristics only, not real Core Web Vitals)
+    perf = result.get("performance") or {}
+    if perf.get("response_time_seconds") and perf["response_time_seconds"] > 2.0:
+        _add_recommendation(
+            result,
+            category="performance",
+            message="The initial HTTP response time is over 2 seconds.",
+            purpose="Improve server performance or caching to reduce time to first byte and speed up page loads.",
+        )
+    if perf.get("content_length_bytes") and perf["content_length_bytes"] > 500_000:
+        _add_recommendation(
+            result,
+            category="performance",
+            message="The HTML response is quite heavy (>500KB).",
+            purpose="Reduce page weight by optimizing images, scripts and other assets.",
+        )
+    if perf.get("script_count") and perf["script_count"] > 20:
+        _add_recommendation(
+            result,
+            category="performance",
+            message="Many JavaScript <script> tags were found on this page.",
+            purpose="Consider bundling, deferring or removing non‑critical scripts to improve loading speed.",
+        )
+
+    if not viewport_present:
+        _add_recommendation(
+            result,
+            category="mobile",
+            message="No responsive viewport meta tag found.",
+            purpose="Add <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"> so the layout adapts to mobile devices.",
+        )
+
+    if not structured_data_present:
+        _add_recommendation(
+            result,
+            category="structured_data",
+            message="No structured data (schema.org) detected on this page.",
+            purpose="Add relevant JSON‑LD or microdata to become eligible for rich results (e.g. Article, Product, FAQ).",
+        )
+
+    # Off-page / authority (cannot be measured from HTML, but important to mention)
+    _add_recommendation(
+        result,
+        category="off_page",
+        message="Review your backlink profile and brand mentions using external tools (e.g. Google Search Console, analytics, SEO platforms).",
+        purpose="Strengthen domain authority and trust signals beyond on‑page optimizations.",
+    )
 
     return result
 
