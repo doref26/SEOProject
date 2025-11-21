@@ -711,62 +711,63 @@ export default function App() {
               }}
             >
               <h2 style={{ marginTop: 0, fontSize: "18px" }}>Summary</h2>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  justifyContent: "space-between",
-                  gap: "16px"
-                }}
-              >
-                <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
-                <div><strong>Final URL:</strong> {result.final_url}</div>
-                <div><strong>Status:</strong> {result.http?.status_code}</div>
-                    <div>
-                      <strong>Response time:</strong>{" "}
-                      <span
-                        style={{
-                          color:
-                            typeof result.http?.response_time_seconds === "number"
-                              ? result.http.response_time_seconds <= 1
-                                ? "#22c55e"
-                                : result.http.response_time_seconds <= 2
-                                ? "#eab308"
-                                : "#f97316"
-                              : "#e5e7eb"
-                        }}
-                      >
-                        {result.http?.response_time_seconds}s
-                      </span>
-                    </div>
-                <div><strong>Content length:</strong> {result.http?.content_length_bytes} bytes</div>
-              </div>
-                </div>
-                {seoScore && (
+              {seoScore && (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    gap: 6,
+                    marginBottom: 12
+                  }}
+                >
                   <button
                     type="button"
                     onClick={() => setShowScoreDetails(true)}
                     style={{
-                      width: "72px",
-                      height: "72px",
+                      width: "80px",
+                      height: "80px",
                       borderRadius: "999px",
                       border: `4px solid ${getScoreColor(seoScore.score)}`,
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
-                      fontSize: "20px",
+                      fontSize: "22px",
                       fontWeight: 700,
                       background: "#020617",
                       color: getScoreColor(seoScore.score),
-                      cursor: "pointer",
-                      flexShrink: 0
+                      cursor: "pointer"
                     }}
                     title="Click to see how this SEO score was calculated"
                   >
                     {seoScore.score}
                   </button>
-                )}
+                  <div style={{ fontSize: "13px", color: "#cbd5f5" }}>
+                    Overall SEO score: <strong>{seoScore.score}/100</strong> ({seoScore.grade})
+                  </div>
+                </div>
+              )}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+                <div><strong>Final URL:</strong> {result.final_url}</div>
+                <div><strong>Status:</strong> {result.http?.status_code}</div>
+                <div>
+                  <strong>Response time:</strong>{" "}
+                  <span
+                    style={{
+                      color:
+                        typeof result.http?.response_time_seconds === "number"
+                          ? result.http.response_time_seconds <= 1
+                            ? "#22c55e"
+                            : result.http.response_time_seconds <= 2
+                            ? "#eab308"
+                            : "#f97316"
+                          : "#e5e7eb"
+                    }}
+                  >
+                    {result.http?.response_time_seconds}s
+                  </span>
+                </div>
+                <div><strong>Content length:</strong> {result.http?.content_length_bytes} bytes</div>
               </div>
               {seoScore && mainRecommendations.length > 0 && (
                 <div style={{ marginTop: "10px" }}>
