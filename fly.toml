@@ -1,0 +1,29 @@
+# fly.toml app configuration file generated for msc-seo-analyzer on 2025-11-28T09:53:12+02:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'msc-seo-analyzer'
+primary_region = 'iad'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  PORT = '8080'
+  # Origins (schemes + hosts) allowed to call this API from the browser.
+  # Include both local dev and the deployed frontend app.
+  ALLOWED_ORIGINS = "http://localhost:5173, https://msc-seo-analyzer.fly.dev, https://msc-seo-analyzer-frontend.fly.dev"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1

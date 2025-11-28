@@ -1,5 +1,13 @@
 import React, { useMemo, useState } from "react";
 
+// Allow configuring the backend URL via Vite env (e.g. VITE_API_BASE_URL=https://msc-seo-analyzer.fly.dev)
+// In local development you can keep using the relative path (proxy) by leaving this empty.
+const API_BASE_URL =
+  (typeof import.meta !== "undefined" &&
+    import.meta.env &&
+    (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "")) ||
+  "";
+
 const CATEGORY_LABELS = {
   title: "Title tag",
   meta_description: "Meta description",
@@ -509,7 +517,7 @@ export default function App() {
 
     setLoading(true);
     try {
-      const response = await fetch("/api/analyze", {
+      const response = await fetch(`${API_BASE_URL}/api/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: normalizedUrl })

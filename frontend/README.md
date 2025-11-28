@@ -19,3 +19,4 @@ The app will start at http://localhost:5173 and proxy API requests to http://127
 
 
 
+
