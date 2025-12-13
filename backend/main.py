@@ -4,6 +4,9 @@ from pydantic import BaseModel
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from .seo_analyzer import analyze_url, normalize_url
 from .rag_service import RAGConfigError, chat_about_analysis, generate_llm_analysis
@@ -47,6 +50,15 @@ class ChatRequest(BaseModel):
 
 
 app = FastAPI(title="SEO Analyzer API", version="0.1.0")
+
+"""
+Load environment variables from a .env file at the project root (one level
+above the backend package). This lets you define all API keys and config in
+`.env` without exporting them manually, and keeps them out of Git.
+"""
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
+
 
 allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
 allowed_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()] or [
