@@ -1,0 +1,72 @@
+# =========
+# Global / OS
+# =========
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+
+# =========
+# Python backend
+# =========
+backend/__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env.bak
+
+# Python packaging / build
+build/
+dist/
+*.egg-info/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# =========
+# Node / Vite frontend
+# =========
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.turbo/
+frontend/.cache/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# =========
+# Environment & local config (secrets)
+# =========
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+
+# Backend app-level settings file (contains runtime config, not code)
+backend/settings.json
+
+# =========
+# Qdrant / embeddings artifacts (if large or re-generable)
+# =========
+backend/embeddings/*.bin
+backend/embeddings/*.pt
+backend/embeddings/*.pkl
+backend/embeddings/__pycache__/
+
+

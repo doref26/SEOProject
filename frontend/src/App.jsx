@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 // Allow configuring the backend URL via Vite env (e.g. VITE_API_BASE_URL=https://msc-seo-analyzer.fly.dev)
 // In local development you can keep using the relative path (proxy) by leaving this empty.
@@ -70,6 +70,49 @@ function IconGoogle() {
     <IconBadge title="Google Search">
       G
     </IconBadge>
+  );
+}
+
+function AIBadge() {
+  return (
+    <span
+      aria-label="AI enhanced"
+      title="This section uses AI‑generated insights"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "2px 8px",
+        borderRadius: 999,
+        fontSize: "10px",
+        fontWeight: 600,
+        letterSpacing: "0.06em",
+        textTransform: "uppercase",
+        background: "linear-gradient(90deg,#4f46e5,#2563eb)",
+        color: "#e5e7eb",
+        border: "1px solid rgba(148,163,184,0.5)"
+      }}
+    >
+      AI
+    </span>
+  );
+}
+
+function Spinner({ size = 14 }) {
+  return (
+    <span
+      style={{
+        width: size,
+        height: size,
+        borderRadius: "999px",
+        border: "2px solid rgba(148,163,184,0.4)",
+        borderTopColor: "#e5e7eb",
+        display: "inline-block",
+        animation: "spin-seo 0.8s linear infinite",
+        marginRight: 6,
+        boxSizing: "border-box"
+      }}
+    />
   );
 }
 
@@ -461,9 +504,60 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
+  const [llmResult, setLlmResult] = useState(null);
   const [analysisMode, setAnalysisMode] = useState("html"); // "html" | "json"
   const [highlightInfoKey, setHighlightInfoKey] = useState(null);
   const [showScoreDetails, setShowScoreDetails] = useState(false);
+  const [useLlm, setUseLlm] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatError, setChatError] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [chatExpanded, setChatExpanded] = useState(false);
+  const [llmProvider, setLlmProvider] = useState("ollama"); // 'ollama' | 'openai' | 'gemini'
+  const [embeddingBackend, setEmbeddingBackend] = useState("ollama"); // 'ollama' | 'local' | 'openai'
+  const [useRag, setUseRag] = useState(true);
+
+  useEffect(() => {
+    // Inject a simple keyframes rule for the spinner once.
+    try {
+      const id = "seo-spinner-style";
+      if (!document.getElementById(id)) {
+        const style = document.createElement("style");
+        style.id = id;
+        style.innerHTML =
+          "@keyframes spin-seo{0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}";
+        document.head.appendChild(style);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem("seo_llm_settings");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed.llmProvider) setLlmProvider(parsed.llmProvider);
+        if (parsed.embeddingBackend) setEmbeddingBackend(parsed.embeddingBackend);
+        if (typeof parsed.useRag === "boolean") setUseRag(parsed.useRag);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const data = { llmProvider, embeddingBackend, useRag };
+      window.localStorage.setItem("seo_llm_settings", JSON.stringify(data));
+    } catch {
+      // ignore
+    }
+  }, [llmProvider, embeddingBackend, useRag]);
 
   const valid = isLikelyUrl(url);
   const advancedInsights = useMemo(() => getAdvancedSeoInsights(result), [result]);
@@ -499,11 +593,47 @@ export default function App() {
     () => getMainRecommendations(result, CATEGORY_LABELS),
     [result]
   );
+  const effectiveScore = useMemo(() => {
+    if (llmResult && typeof llmResult.score === "number") {
+      return llmResult.score;
+    }
+    return seoScore ? seoScore.score : null;
+  }, [llmResult, seoScore]);
+  const effectiveGrade = useMemo(() => {
+    if (llmResult && typeof llmResult.grade === "string" && llmResult.grade.trim()) {
+      return llmResult.grade;
+    }
+    return seoScore ? seoScore.grade : null;
+  }, [llmResult, seoScore]);
+  const aiCategoryImpact = useMemo(() => {
+    if (!llmResult || !Array.isArray(llmResult.priority_issues) || !llmResult.priority_issues.length) {
+      return null;
+    }
+    const weightMap = { high: 3, medium: 2, low: 1 };
+    const byCat = new Map();
+    llmResult.priority_issues.forEach((issue) => {
+      const cat = issue.category || "other";
+      const weight = weightMap[(issue.impact || "").toLowerCase()] || 1;
+      const current = byCat.get(cat) || {
+        category: cat,
+        label: CATEGORY_LABELS[cat] || cat,
+        issues: 0,
+        impactScore: 0
+      };
+      current.issues += 1;
+      current.impactScore += weight;
+      byCat.set(cat, current);
+    });
+    const arr = Array.from(byCat.values());
+    arr.sort((a, b) => b.impactScore - a.impactScore);
+    return arr;
+  }, [llmResult]);
 
   async function handleAnalyze(e) {
     e.preventDefault();
     setError("");
     setResult(null);
+    setLlmResult(null);
     if (!valid) {
       setError("Please enter a valid URL (for example: example.com or https://example.com).");
       return;
@@ -517,10 +647,17 @@ export default function App() {
 
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/analyze`, {
+      const endpointPath = useLlm ? "/api/analyze_llm" : "/api/analyze";
+      const body = { url: normalizedUrl };
+      if (useLlm) {
+        body.provider = llmProvider;
+        body.embedding_backend = embeddingBackend;
+        body.use_rag = useRag;
+      }
+      const response = await fetch(`${API_BASE_URL}${endpointPath}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: normalizedUrl })
+        body: JSON.stringify(body)
       });
       let json = null;
       try {
@@ -550,10 +687,46 @@ export default function App() {
       }
 
       setResult(json.data);
+      setLlmResult(json.llm || null);
     } catch (err) {
       setError(err.message || "Something went wrong while analyzing this URL.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleSendChat() {
+    if (!result || !chatInput.trim()) return;
+    const newMessage = { role: "user", content: chatInput.trim() };
+    const nextMessages = [...chatMessages, newMessage];
+    setChatMessages(nextMessages);
+    setChatInput("");
+    setChatLoading(true);
+    setChatError("");
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/chat_llm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          analysis: result,
+          llm: llmResult || null,
+          messages: nextMessages,
+          provider: llmProvider,
+          embedding_backend: embeddingBackend,
+          use_rag: useRag
+        })
+      });
+      const json = await response.json();
+      if (!response.ok || !json?.ok) {
+        throw new Error(json?.detail || json?.message || "Chat failed. Please try again.");
+      }
+      const reply = json.message || "";
+      setChatMessages((prev) => [...prev, { role: "assistant", content: reply }]);
+    } catch (err) {
+      setChatError(err.message || "Something went wrong while talking to the SEO assistant.");
+    } finally {
+      setChatLoading(false);
     }
   }
 
@@ -572,39 +745,59 @@ export default function App() {
           style={{
             marginBottom: "24px",
             display: "flex",
-            flexDirection: "column",
-            gap: "4px"
+            flexDirection: "row",
+            justifyContent: "space-between",
+            alignItems: "flex-start",
+            gap: "12px"
           }}
         >
-          <h1
+          <div style={{ display: "flex", flexDirection: "column", gap: "4px", flex: 1 }}>
+            <h1
+              style={{
+                margin: 0,
+                fontSize: "30px",
+                fontWeight: 700,
+                letterSpacing: "-0.02em"
+              }}
+            >
+              SEO Analyzer
+            </h1>
+            <p
+              style={{
+                margin: "4px 0 0",
+                color: "#9ca3af",
+                maxWidth: "640px"
+              }}
+            >
+              Enter a website URL to get a clear, prioritized SEO review of your titles, meta tags, content,
+              technical setup and more.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
             style={{
-              margin: 0,
-              fontSize: "30px",
-              fontWeight: 700,
-              letterSpacing: "-0.02em"
+              borderRadius: 999,
+              border: "1px solid #1f2937",
+              background: "#020617",
+              color: "#e5e7eb",
+              padding: "6px 10px",
+              fontSize: "12px",
+              cursor: "pointer"
             }}
           >
-            SEO Analyzer
-          </h1>
-          <p
-            style={{
-              margin: "4px 0 0",
-              color: "#9ca3af",
-              maxWidth: "640px"
-            }}
-          >
-            Enter a website URL to get a clear, prioritized SEO review of your titles, meta tags, content,
-            technical setup and more.
-          </p>
+            Settings
+          </button>
         </header>
 
         <form
           onSubmit={handleAnalyze}
           style={{
             display: "flex",
+            flexWrap: "wrap",
             gap: "8px",
             alignItems: "center",
-            marginBottom: "12px"
+            marginBottom: "8px"
           }}
         >
           <input
@@ -636,9 +829,43 @@ export default function App() {
               fontWeight: 600
             }}
           >
-            {loading ? "Analyzing..." : "Analyze"}
+            {loading ? (
+              <>
+                <Spinner />
+                <span>Analyzing...</span>
+              </>
+            ) : (
+              "Analyze"
+            )}
           </button>
         </form>
+
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: "8px",
+            marginBottom: "12px",
+            fontSize: "13px",
+            flexWrap: "wrap"
+          }}
+        >
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "#cbd5f5" }}>
+            <input
+              type="checkbox"
+              checked={useLlm}
+              onChange={(e) => setUseLlm(e.target.checked)}
+              style={{ accentColor: "#2563eb" }}
+            />
+            <span>Use AI‑enhanced analysis (RAG + LLM)</span>
+          </label>
+          {useLlm && (
+            <span style={{ color: "#9ca3af" }}>
+              May take a bit longer and uses your LLM credits.
+            </span>
+          )}
+        </div>
 
         <div
           style={{
@@ -718,8 +945,18 @@ export default function App() {
                 padding: "16px"
               }}
             >
-              <h2 style={{ marginTop: 0, fontSize: "18px" }}>Summary</h2>
-              {seoScore && (
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginBottom: 6
+                }}
+              >
+                <h2 style={{ marginTop: 0, fontSize: "18px" }}>Summary</h2>
+                {llmResult && <AIBadge />}
+              </div>
+              {effectiveScore != null && (
                 <div
                   style={{
                     display: "flex",
@@ -736,22 +973,24 @@ export default function App() {
                       width: "80px",
                       height: "80px",
                       borderRadius: "999px",
-                      border: `4px solid ${getScoreColor(seoScore.score)}`,
+                      border: `4px solid ${getScoreColor(effectiveScore)}`,
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
                       fontSize: "22px",
                       fontWeight: 700,
                       background: "#020617",
-                      color: getScoreColor(seoScore.score),
+                      color: getScoreColor(effectiveScore),
                       cursor: "pointer"
                     }}
                     title="Click to see how this SEO score was calculated"
                   >
-                    {seoScore.score}
+                    {effectiveScore}
                   </button>
                   <div style={{ fontSize: "13px", color: "#cbd5f5" }}>
-                    Overall SEO score: <strong>{seoScore.score}/100</strong> ({seoScore.grade})
+                    Overall SEO score:{" "}
+                    <strong>{effectiveScore}/100</strong>{" "}
+                    {effectiveGrade && <>({effectiveGrade})</>}
                   </div>
                 </div>
               )}
@@ -777,16 +1016,48 @@ export default function App() {
                 </div>
                 <div><strong>Content length:</strong> {result.http?.content_length_bytes} bytes</div>
               </div>
-              {seoScore && mainRecommendations.length > 0 && (
+              {seoScore && (
                 <div style={{ marginTop: "10px" }}>
-                  <h3 style={{ margin: "0 0 4px", fontSize: "14px" }}>Main SEO issues to focus on</h3>
-                  <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "13px", color: "#f97316" }}>
-                    {mainRecommendations.slice(0, 3).map((rec, idx) => (
-                      <li key={idx}>
-                        <strong>{rec.label}:</strong> {rec.message}
-                      </li>
-                    ))}
-                  </ul>
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginBottom: 4
+                    }}
+                  >
+                    <h3 style={{ margin: 0, fontSize: "14px" }}>Main SEO issues to focus on</h3>
+                    {llmResult && Array.isArray(llmResult.priority_issues) && llmResult.priority_issues.length > 0 && (
+                      <AIBadge />
+                    )}
+                  </div>
+                  {llmResult && Array.isArray(llmResult.priority_issues) && llmResult.priority_issues.length > 0 ? (
+                    <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "13px", color: "#f97316" }}>
+                      {llmResult.priority_issues.slice(0, 3).map((issue, idx) => {
+                        const label = CATEGORY_LABELS[issue.category] || issue.category;
+                        const primaryAction =
+                          Array.isArray(issue.recommended_actions) && issue.recommended_actions.length
+                            ? issue.recommended_actions[0]
+                            : null;
+                        return (
+                          <li key={idx}>
+                            <strong>{label}:</strong> {issue.title}
+                            {primaryAction && (
+                              <span style={{ color: "#9ca3af" }}> — {primaryAction}</span>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : mainRecommendations.length > 0 ? (
+                    <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "13px", color: "#f97316" }}>
+                      {mainRecommendations.slice(0, 3).map((rec, idx) => (
+                        <li key={idx}>
+                          <strong>{rec.label}:</strong> {rec.message}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
                 </div>
               )}
             </section>
@@ -946,6 +1217,55 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+              {llmResult && (
+                <div
+                  style={{
+                    marginTop: "12px",
+                    paddingTop: "10px",
+                    borderTop: "1px solid #1b2440"
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginBottom: 4
+                    }}
+                  >
+                    <h3 style={{ margin: 0, fontSize: "14px" }}>AI‑enhanced SEO insight</h3>
+                    <AIBadge />
+                  </div>
+                  <p style={{ margin: "0 0 6px", fontSize: "13px", color: "#cbd5f5" }}>
+                    {llmResult.summary}
+                  </p>
+                  {Array.isArray(llmResult.priority_issues) && llmResult.priority_issues.length > 0 && (
+                    <div style={{ marginTop: 6 }}>
+                      <strong style={{ fontSize: "13px" }}>Top AI‑prioritized issues:</strong>
+                      <ul style={{ margin: "4px 0 0", paddingLeft: "16px", fontSize: "13px", color: "#f97316" }}>
+                        {llmResult.priority_issues.slice(0, 3).map((issue, idx) => (
+                          <li key={idx}>
+                            <span style={{ fontWeight: 600 }}>{issue.title}</span>
+                            {issue.impact && (
+                              <span style={{ color: "#9ca3af" }}> · impact: {issue.impact}</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {Array.isArray(llmResult.quick_wins) && llmResult.quick_wins.length > 0 && (
+                    <div style={{ marginTop: 6 }}>
+                      <strong style={{ fontSize: "13px" }}>Quick wins:</strong>
+                      <ul style={{ margin: "4px 0 0", paddingLeft: "16px", fontSize: "13px", color: "#bbf7d0" }}>
+                        {llmResult.quick_wins.slice(0, 3).map((item, idx) => (
+                          <li key={idx}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
                 </section>
 
             <section
@@ -1728,11 +2048,13 @@ export default function App() {
                 </button>
       </div>
               <p style={{ margin: "0 0 8px", fontSize: "13px", color: "#cbd5f5" }}>
-                The score starts at <strong>{seoScore.baseScore}</strong> and subtracts points for issues in
-                different SEO areas. More issues or more important issues in a category lead to a bigger penalty.
+                The base score starts at <strong>{seoScore.baseScore}</strong> and is adjusted based on issues
+                in different SEO areas. The overall score shown above reflects this analysis together with the
+                AI&apos;s judgment of which issues matter most.
               </p>
               <p style={{ margin: "0 0 6px", fontSize: "13px", color: "#9ca3af" }}>
-                <strong>Final score:</strong> {seoScore.score}/100 ({seoScore.grade}) &middot;{" "}
+                <strong>Final score:</strong> {effectiveScore ?? seoScore.score}/100{" "}
+                ({effectiveGrade ?? seoScore.grade}) &middot;{" "}
                 <strong>Total penalty:</strong> {seoScore.totalPenalty} points
               </p>
               <div
@@ -1754,7 +2076,7 @@ export default function App() {
                   }}
                 >
                   <span>Overall SEO score</span>
-                  <span>{seoScore.score}/100</span>
+                  <span>{(effectiveScore ?? seoScore.score)}/100</span>
                 </div>
                 <div
                   style={{
@@ -1766,62 +2088,78 @@ export default function App() {
                     border: "1px solid #111827"
                   }}
                 >
-                  <div
-                    style={{
-                      width: `${seoScore.score}%`,
-                      height: "100%",
-                      background:
-                        seoScore.score >= 85
-                          ? "linear-gradient(90deg,#22c55e,#4ade80)"
-                          : seoScore.score >= 70
-                          ? "linear-gradient(90deg,#eab308,#fbbf24)"
-                          : "linear-gradient(90deg,#ef4444,#f97316)"
-                    }}
-                  />
+                    <div
+                      style={{
+                        width: `${effectiveScore ?? seoScore.score}%`,
+                        height: "100%",
+                        background:
+                          (effectiveScore ?? seoScore.score) >= 85
+                            ? "linear-gradient(90deg,#22c55e,#4ade80)"
+                            : (effectiveScore ?? seoScore.score) >= 70
+                            ? "linear-gradient(90deg,#eab308,#fbbf24)"
+                            : "linear-gradient(90deg,#ef4444,#f97316)"
+                      }}
+                    />
                 </div>
               </div>
 
               <h3 style={{ margin: "0 0 4px", fontSize: "14px" }}>Per‑category impact</h3>
               <ul style={{ margin: 0, paddingLeft: "0", fontSize: "13px", color: "#d1d5db", listStyle: "none" }}>
-                {seoScore.breakdown.map((item, idx) => {
-                  const share =
-                    seoScore.totalPenalty > 0 ? Math.max(8, (item.penalty / seoScore.totalPenalty) * 100) : 0;
-                  return (
-                    <li key={idx} style={{ marginBottom: 6 }}>
-                      <div
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                          marginBottom: 2
-                        }}
-                      >
-                        <span>{item.label}</span>
-                        <span style={{ fontSize: "12px", color: "#9ca3af" }}>
-                          −{item.penalty} ({item.issues} issue{item.issues > 1 ? "s" : ""})
-                        </span>
-                      </div>
-                      <div
-                        style={{
-                          width: "100%",
-                          height: "6px",
-                          borderRadius: 999,
-                          background: "#020617",
-                          overflow: "hidden",
-                          border: "1px solid #111827"
-                        }}
-                      >
+                {(aiCategoryImpact && aiCategoryImpact.length ? aiCategoryImpact : seoScore.breakdown).map(
+                  (item, idx, arr) => {
+                    const total =
+                      aiCategoryImpact && aiCategoryImpact.length
+                        ? aiCategoryImpact.reduce((sum, x) => sum + x.impactScore, 0) || 1
+                        : seoScore.totalPenalty || 1;
+                    const value = aiCategoryImpact ? item.impactScore : item.penalty;
+                    const share = Math.max(8, (value / total) * 100);
+                    const label = item.label || CATEGORY_LABELS[item.category] || item.category;
+                    const issues = item.issues;
+                    return (
+                      <li key={idx} style={{ marginBottom: 6 }}>
                         <div
                           style={{
-                            width: `${share}%`,
-                            height: "100%",
-                            background: "#ef4444"
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            marginBottom: 2
                           }}
-                        />
-                      </div>
-                    </li>
-                  );
-                })}
+                        >
+                          <span>{label}</span>
+                          <span style={{ fontSize: "12px", color: "#9ca3af" }}>
+                            {aiCategoryImpact ? (
+                              <>
+                                impact score {value} ({issues} issue{issues > 1 ? "s" : ""})
+                              </>
+                            ) : (
+                              <>
+                                −{value} ({issues} issue{issues > 1 ? "s" : ""})
+                              </>
+                            )}
+                          </span>
+                        </div>
+                        <div
+                          style={{
+                            width: "100%",
+                            height: "6px",
+                            borderRadius: 999,
+                            background: "#020617",
+                            overflow: "hidden",
+                            border: "1px solid #111827"
+                          }}
+                        >
+                          <div
+                            style={{
+                              width: `${share}%`,
+                              height: "100%",
+                              background: "#ef4444"
+                            }}
+                          />
+                        </div>
+                      </li>
+                    );
+                  }
+                )}
               </ul>
               <p style={{ margin: "10px 0 0", fontSize: "12px", color: "#9ca3af" }}>
                 Use this breakdown together with the advanced analysis to decide which areas to improve first.
@@ -1832,6 +2170,399 @@ export default function App() {
           </div>
         )}
       </div>
+      {/* Floating chat assistant */}
+      <div
+        style={{
+          position: "fixed",
+          right: 20,
+          bottom: 20,
+          zIndex: 50
+        }}
+      >
+        {!chatOpen && (
+          <button
+            type="button"
+            onClick={() => {
+              setChatOpen(true);
+              if (chatMessages.length === 0) {
+                setChatMessages([
+                  {
+                    role: "assistant",
+                    content:
+                      "Hi! I’m your SEO assistant. After you run an analysis, ask me anything about the results, issues, or how to fix them."
+                  }
+                ]);
+              }
+            }}
+            style={{
+              width: 52,
+              height: 52,
+              borderRadius: "999px",
+              border: "none",
+              background: "#2563eb",
+              color: "#ffffff",
+              boxShadow: "0 14px 40px rgba(15,23,42,0.9)",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: "22px",
+              position: "relative"
+            }}
+            title="Chat with the SEO assistant"
+          >
+            <span
+              style={{
+                display: "inline-block",
+                transform: "translateY(-1px)"
+              }}
+            >
+              💬
+            </span>
+          </button>
+        )}
+        {chatOpen && (
+          <div
+            style={{
+              width: chatExpanded ? 480 : 340,
+              maxWidth: "100vw",
+              maxHeight: chatExpanded ? "82vh" : "70vh",
+              background: "radial-gradient(circle at top left, #1d4ed8 0, #020617 55%, #020617 100%)",
+              borderRadius: 16,
+              border: "1px solid rgba(59,130,246,0.7)",
+              boxShadow: "0 22px 60px rgba(15,23,42,0.95)",
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+              backdropFilter: "blur(10px)"
+            }}
+          >
+            <div
+              style={{
+                padding: "10px 12px",
+                borderBottom: "1px solid #1f2937",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+              gap: 8,
+              background: "linear-gradient(90deg, #0f172a, #020617)"
+              }}
+            >
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                <span style={{ fontSize: "13px", fontWeight: 600 }}>SEO assistant</span>
+                <span style={{ fontSize: "11px", color: "#9ca3af" }}>
+                  Ask questions about this page’s analysis
+                </span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => setChatExpanded((v) => !v)}
+                  title={chatExpanded ? "Shrink chat" : "Enlarge chat"}
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    color: "#9ca3af",
+                    cursor: "pointer",
+                    fontSize: "16px",
+                    lineHeight: 1
+                  }}
+                >
+                  {chatExpanded ? "▢" : "⬜"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setChatOpen(false)}
+                  title="Minimize"
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    color: "#9ca3af",
+                    cursor: "pointer",
+                    fontSize: "18px",
+                    lineHeight: 1
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+            <div
+              style={{
+                flex: 1,
+                overflowY: "auto",
+                padding: "10px 12px",
+                background: "linear-gradient(180deg, rgba(15,23,42,0.9), #020617)"
+              }}
+            >
+              {!result && (
+                <p style={{ fontSize: "13px", color: "#9ca3af", margin: 0 }}>
+                  Run an analysis first, then you can ask me about the findings, issues, and how to
+                  improve them.
+                </p>
+              )}
+              {result && chatMessages.map((m, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    marginBottom: 8,
+                    display: "flex",
+                    justifyContent: m.role === "user" ? "flex-end" : "flex-start"
+                  }}
+                >
+                  <div
+                    style={{
+                      maxWidth: "80%",
+                      padding: "8px 10px",
+                      borderRadius: 12,
+                      fontSize: "13px",
+                      lineHeight: 1.4,
+                      background: m.role === "user" ? "#2563eb" : "#0b1224",
+                      color: m.role === "user" ? "#ffffff" : "#e5e7eb",
+                      border: m.role === "user" ? "none" : "1px solid #1f2937",
+                      boxShadow:
+                        m.role === "user"
+                          ? "0 4px 12px rgba(37,99,235,0.35)"
+                          : "0 2px 8px rgba(15,23,42,0.7)"
+                      ,
+                      whiteSpace: m.role === "assistant" ? "pre-wrap" : "normal"
+                    }}
+                  >
+                    {m.content}
+                  </div>
+                </div>
+              ))}
+              {chatError && (
+                <div
+                  style={{
+                    marginTop: 4,
+                    padding: "6px 8px",
+                    borderRadius: 8,
+                    border: "1px solid #b91c1c",
+                    background: "#111827",
+                    color: "#fee2e2",
+                    fontSize: "11px"
+                  }}
+                >
+                  {chatError}
+                </div>
+              )}
+            </div>
+            <div
+              style={{
+                padding: "8px 10px",
+                borderTop: "1px solid #1f2937",
+                  background: "rgba(2,6,23,0.96)",
+                display: "flex",
+                gap: 6,
+                alignItems: "center"
+              }}
+            >
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    if (!chatLoading) {
+                      handleSendChat();
+                    }
+                  }
+                }}
+                placeholder={
+                  result
+                    ? "Ask about titles, content, technical issues..."
+                    : "Run an analysis first"
+                }
+                disabled={!result || chatLoading}
+                style={{
+                  flex: 1,
+                  borderRadius: 999,
+                  border: "1px solid #1f2937",
+                  background: "#020617",
+                  color: "#e5e7eb",
+                  fontSize: "13px",
+                  padding: "6px 10px",
+                  outline: "none"
+                }}
+              />
+              <button
+                type="button"
+                onClick={handleSendChat}
+                disabled={!result || chatLoading || !chatInput.trim()}
+                style={{
+                  borderRadius: 999,
+                  border: "none",
+                  padding: "6px 10px",
+                  fontSize: "13px",
+                  fontWeight: 600,
+                  background:
+                    !result || chatLoading || !chatInput.trim() ? "#1f2937" : "#2563eb",
+                  color:
+                    !result || chatLoading || !chatInput.trim() ? "#9ca3af" : "#ffffff",
+                  cursor:
+                    !result || chatLoading || !chatInput.trim()
+                      ? "not-allowed"
+                      : "pointer"
+                }}
+              >
+                {chatLoading ? (
+                  <>
+                    <Spinner size={12} />
+                    <span>Thinking...</span>
+                  </>
+                ) : (
+                  "Send"
+                )}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+      {/* Settings modal */}
+      {settingsOpen && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 60,
+            background: "rgba(15,23,42,0.75)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "16px"
+          }}
+          onClick={() => setSettingsOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: 420,
+              background: "#020617",
+              borderRadius: 16,
+              border: "1px solid #1f2937",
+              boxShadow: "0 18px 40px rgba(0,0,0,0.85)",
+              padding: "14px 16px",
+              color: "#e5e7eb"
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginBottom: 8
+              }}
+            >
+              <h2 style={{ margin: 0, fontSize: "16px" }}>AI & analysis settings</h2>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(false)}
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  color: "#9ca3af",
+                  cursor: "pointer",
+                  fontSize: "16px"
+                }}
+                title="Close settings"
+              >
+                ×
+              </button>
+            </div>
+            <p style={{ margin: "0 0 10px", fontSize: "12px", color: "#9ca3af" }}>
+              Choose how the app uses AI and your local/remote models. These settings apply to both the
+              AI‑enhanced analysis and the chat assistant.
+            </p>
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: "13px", marginBottom: 4 }}>LLM provider</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <label style={{ fontSize: "12px", display: "flex", alignItems: "center", gap: 4 }}>
+                  <input
+                    type="radio"
+                    name="llm-provider"
+                    value="ollama"
+                    checked={llmProvider === "ollama"}
+                    onChange={() => setLlmProvider("ollama")}
+                  />
+                  Local (Ollama)
+                </label>
+                <label style={{ fontSize: "12px", display: "flex", alignItems: "center", gap: 4 }}>
+                  <input
+                    type="radio"
+                    name="llm-provider"
+                    value="openai"
+                    checked={llmProvider === "openai"}
+                    onChange={() => setLlmProvider("openai")}
+                  />
+                  OpenAI API
+                </label>
+                <label style={{ fontSize: "12px", display: "flex", alignItems: "center", gap: 4 }}>
+                  <input
+                    type="radio"
+                    name="llm-provider"
+                    value="gemini"
+                    checked={llmProvider === "gemini"}
+                    onChange={() => setLlmProvider("gemini")}
+                  />
+                  Google Gemini API
+                </label>
+              </div>
+            </div>
+            <div style={{ marginBottom: 4 }}>
+              <div style={{ fontSize: "13px", marginBottom: 4 }}>Embedding backend (for RAG)</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                <label style={{ fontSize: "12px", display: "flex", alignItems: "center", gap: 4 }}>
+                  <input
+                    type="radio"
+                    name="embed-backend"
+                    value="ollama"
+                    checked={embeddingBackend === "ollama"}
+                    onChange={() => setEmbeddingBackend("ollama")}
+                  />
+                  Ollama embeddings
+                </label>
+                <label style={{ fontSize: "12px", display: "flex", alignItems: "center", gap: 4 }}>
+                  <input
+                    type="radio"
+                    name="embed-backend"
+                    value="local"
+                    checked={embeddingBackend === "local"}
+                    onChange={() => setEmbeddingBackend("local")}
+                  />
+                  Local model (sentence‑transformers)
+                </label>
+                <label style={{ fontSize: "12px", display: "flex", alignItems: "center", gap: 4 }}>
+                  <input
+                    type="radio"
+                    name="embed-backend"
+                    value="openai"
+                    checked={embeddingBackend === "openai"}
+                    onChange={() => setEmbeddingBackend("openai")}
+                  />
+                  OpenAI embeddings
+                </label>
+              </div>
+            </div>
+            <div style={{ marginTop: 8 }}>
+              <label style={{ fontSize: "12px", display: "flex", alignItems: "center", gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={useRag}
+                  onChange={(e) => setUseRag(e.target.checked)}
+                />
+                <span>Use RAG (vector database context from Qdrant)</span>
+              </label>
+              <p style={{ margin: "4px 0 0", fontSize: "11px", color: "#6b7280" }}>
+                When turned off, the LLM will answer based only on this page&apos;s analysis, without
+                retrieving external SEO documents.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
